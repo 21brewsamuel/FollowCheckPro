@@ -1,5 +1,8 @@
 import { IncomingForm } from 'formidable';
 import { parse } from 'node-html-parser';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 // Disable the default body parser to handle form data
 export const config = {
@@ -16,13 +19,24 @@ export default async function handler(req, res) {
   try {
     console.log('Starting file upload process...');
     
-    // Parse the form data - process files in memory instead of writing to disk
-    const form = new IncomingForm({
+    // Determine if we're running on Vercel
+    const isVercel = process.env.VERCEL === '1';
+    console.log(`Running on ${isVercel ? 'Vercel' : 'local environment'}`);
+    
+    // Configure formidable based on environment
+    const formOptions = {
       keepExtensions: true,
-      // Important: Don't write to filesystem on Vercel
       multiples: true,
-      uploadDir: undefined, // Don't specify an upload directory
-    });
+    };
+    
+    // Only set uploadDir for local environment
+    if (!isVercel) {
+      // Use system temp directory for local development
+      formOptions.uploadDir = os.tmpdir();
+      console.log(`Using temp directory: ${formOptions.uploadDir}`);
+    }
+    
+    const form = new IncomingForm(formOptions);
     
     console.log('Parsing form data...');
     const { fields, files } = await new Promise((resolve, reject) => {
@@ -32,6 +46,11 @@ export default async function handler(req, res) {
           reject(err);
         }
         console.log('Form parsed successfully');
+        // Log file structure to debug
+        console.log('Files structure:', JSON.stringify(Object.keys(files)));
+        if (files.followers) {
+          console.log('Followers file keys:', Object.keys(files.followers));
+        }
         resolve({ fields, files });
       });
     });
@@ -47,54 +66,80 @@ export default async function handler(req, res) {
 
     console.log('Processing files...');
     
-    // Process files directly from memory instead of reading from disk
+    // Process files based on environment
     let followersHtml, followingHtml;
     
-    // Handle different formidable versions and configurations
-    if (files.followers.buffer) {
-      // If formidable provides buffers directly
-      followersHtml = files.followers.buffer.toString('utf8');
-      followingHtml = files.following.buffer.toString('utf8');
-    } else if (files.followers.data) {
-      // Some versions provide data property
-      followersHtml = files.followers.data.toString('utf8');
-      followingHtml = files.following.data.toString('utf8');
-    } else if (Array.isArray(files.followers)) {
-      // Handle array format
-      followersHtml = files.followers[0].buffer?.toString('utf8') || 
-                     files.followers[0].data?.toString('utf8');
-      followingHtml = files.following[0].buffer?.toString('utf8') || 
-                     files.following[0].data?.toString('utf8');
-    } else {
-      // Last resort - try to access the file content from the temporary path
-      // This won't work on Vercel but might work locally
-      console.log('Warning: Falling back to file path method, which may not work on Vercel');
+    // Function to handle file reading with multiple approaches
+    const getFileContents = async (fileObj) => {
+      // Try multiple approaches to get file contents
       
-      // This is just for logging - we'll handle the error if it occurs
-      const followerPath = files.followers.filepath || files.followers.path;
-      const followingPath = files.following.filepath || files.following.path;
-      console.log('Attempted file paths:', { followerPath, followingPath });
-      
-      // This will likely fail on Vercel, but we'll catch the error
-      try {
-        const fs = require('fs');
-        followersHtml = fs.readFileSync(followerPath, 'utf8');
-        followingHtml = fs.readFileSync(followingPath, 'utf8');
-      } catch (fsError) {
-        console.error('File system error:', fsError);
-        return res.status(500).json({
-          success: false,
-          message: 'Error reading files. This may be due to deployment environment restrictions.'
-        });
+      // Approach 1: Direct buffer or data access (memory)
+      if (fileObj.buffer) {
+        console.log('Reading from buffer property');
+        return fileObj.buffer.toString('utf8');
       }
-    }
+      
+      if (fileObj.data) {
+        console.log('Reading from data property');
+        return fileObj.data.toString('utf8');
+      }
+      
+      // Approach 2: Read from file path (works in local environment)
+      const filePath = fileObj.filepath || fileObj.path;
+      if (filePath && fs.existsSync(filePath)) {
+        console.log(`Reading from file path: ${filePath}`);
+        return fs.readFileSync(filePath, 'utf8');
+      }
+      
+      // Approach 3: Handle array format
+      if (Array.isArray(fileObj)) {
+        console.log('File object is an array, trying first element');
+        const firstFile = fileObj[0];
+        
+        if (firstFile.buffer) {
+          return firstFile.buffer.toString('utf8');
+        }
+        
+        if (firstFile.data) {
+          return firstFile.data.toString('utf8');
+        }
+        
+        const firstFilePath = firstFile.filepath || firstFile.path;
+        if (firstFilePath && fs.existsSync(firstFilePath)) {
+          return fs.readFileSync(firstFilePath, 'utf8');
+        }
+      }
+      
+      // Approach 4: Try to access the file content using a stream (for newer formidable versions)
+      if (fileObj.toJSON) {
+        console.log('File has toJSON method, trying to extract content');
+        const fileData = fileObj.toJSON();
+        console.log('File JSON data keys:', Object.keys(fileData));
+        
+        if (fileData.filepath && fs.existsSync(fileData.filepath)) {
+          return fs.readFileSync(fileData.filepath, 'utf8');
+        }
+      }
+      
+      console.error('Could not extract file contents with any method');
+      return null;
+    };
+    
+    // Get file contents
+    followersHtml = await getFileContents(files.followers);
+    followingHtml = await getFileContents(files.following);
 
     if (!followersHtml || !followingHtml) {
+      console.error('Failed to extract file contents');
       return res.status(500).json({
         success: false,
-        message: 'Could not extract file contents'
+        message: 'Could not extract file contents. Please try again.'
       });
     }
+
+    console.log('Successfully extracted file contents');
+    console.log('Followers HTML length:', followersHtml.length);
+    console.log('Following HTML length:', followingHtml.length);
 
     console.log('Extracting usernames...');
     // Extract usernames from the HTML
@@ -118,7 +163,26 @@ export default async function handler(req, res) {
     // Here we're simulating storage for the example
     global.fullResultsList = nonFollowers;
 
-    // No need to clean up files as we're not writing to disk
+    // Clean up temporary files if we're in local environment
+    if (!isVercel) {
+      try {
+        const followerPath = files.followers.filepath || files.followers.path;
+        const followingPath = files.following.filepath || files.following.path;
+        
+        if (followerPath && fs.existsSync(followerPath)) {
+          fs.unlinkSync(followerPath);
+        }
+        
+        if (followingPath && fs.existsSync(followingPath)) {
+          fs.unlinkSync(followingPath);
+        }
+        
+        console.log('Temporary files cleaned up');
+      } catch (cleanupError) {
+        console.error('Error cleaning up files:', cleanupError);
+        // Continue despite cleanup errors
+      }
+    }
 
     console.log('Processing complete, returning results');
     return res.status(200).json({ 

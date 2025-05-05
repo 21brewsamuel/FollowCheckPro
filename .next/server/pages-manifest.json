@@ -3,6 +3,8 @@
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
   "/upload": "pages/upload.js",
+  "/api/parse-files": "pages/api/parse-files.js",
   "/results": "pages/results.js",
+  "/api/get-results": "pages/api/get-results.js",
   "/": "pages/index.js"
 }
