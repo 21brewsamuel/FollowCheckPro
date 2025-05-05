@@ -1,6 +1,4 @@
 import { IncomingForm } from 'formidable';
-import fs from 'fs';
-import path from 'path';
 import { parse } from 'node-html-parser';
 
 // Disable the default body parser to handle form data
@@ -18,17 +16,14 @@ export default async function handler(req, res) {
   try {
     console.log('Starting file upload process...');
     
-    // Parse the form data
-    const form = new IncomingForm();
-    form.uploadDir = path.join(process.cwd(), 'tmp');
-    form.keepExtensions = true;
+    // Parse the form data - process files in memory instead of writing to disk
+    const form = new IncomingForm({
+      keepExtensions: true,
+      // Important: Don't write to filesystem on Vercel
+      multiples: true,
+      uploadDir: undefined, // Don't specify an upload directory
+    });
     
-    // Create upload directory if it doesn't exist
-    if (!fs.existsSync(form.uploadDir)) {
-      console.log('Creating upload directory:', form.uploadDir);
-      fs.mkdirSync(form.uploadDir, { recursive: true });
-    }
-
     console.log('Parsing form data...');
     const { fields, files } = await new Promise((resolve, reject) => {
       form.parse(req, (err, fields, files) => {
@@ -36,80 +31,70 @@ export default async function handler(req, res) {
           console.error('Form parsing error:', err);
           reject(err);
         }
-        console.log('Form parsed successfully. Files received:', Object.keys(files));
-        // Log the full file objects to see their structure
-        console.log('Followers file object:', JSON.stringify(files.followers));
-        console.log('Following file object:', JSON.stringify(files.following));
+        console.log('Form parsed successfully');
         resolve({ fields, files });
       });
     });
 
     // Check if both files were uploaded
     if (!files.followers || !files.following) {
-      console.error('Missing files:', { 
-        hasFollowers: !!files.followers, 
-        hasFollowing: !!files.following 
-      });
+      console.error('Missing files');
       return res.status(400).json({ 
         success: false, 
         message: 'Please upload both followers and following files' 
       });
     }
 
-    console.log('Reading file contents...');
+    console.log('Processing files...');
     
-    // Get file paths - handle different versions of formidable
-    // In newer versions, the file object structure has changed
-    let followersPath, followingPath;
+    // Process files directly from memory instead of reading from disk
+    let followersHtml, followingHtml;
     
-    if (files.followers.filepath) {
-      // Newer formidable versions
-      followersPath = files.followers.filepath;
-      followingPath = files.following.filepath;
-    } else if (files.followers.path) {
-      // Older formidable versions
-      followersPath = files.followers.path;
-      followingPath = files.following.path;
+    // Handle different formidable versions and configurations
+    if (files.followers.buffer) {
+      // If formidable provides buffers directly
+      followersHtml = files.followers.buffer.toString('utf8');
+      followingHtml = files.following.buffer.toString('utf8');
+    } else if (files.followers.data) {
+      // Some versions provide data property
+      followersHtml = files.followers.data.toString('utf8');
+      followingHtml = files.following.data.toString('utf8');
     } else if (Array.isArray(files.followers)) {
-      // Some versions return arrays
-      followersPath = files.followers[0].filepath || files.followers[0].path;
-      followingPath = files.following[0].filepath || files.following[0].path;
+      // Handle array format
+      followersHtml = files.followers[0].buffer?.toString('utf8') || 
+                     files.followers[0].data?.toString('utf8');
+      followingHtml = files.following[0].buffer?.toString('utf8') || 
+                     files.following[0].data?.toString('utf8');
     } else {
-      // Try to find any property that might contain the path
-      const followerKeys = Object.keys(files.followers);
-      const followingKeys = Object.keys(files.following);
+      // Last resort - try to access the file content from the temporary path
+      // This won't work on Vercel but might work locally
+      console.log('Warning: Falling back to file path method, which may not work on Vercel');
       
-      console.log('Follower file keys:', followerKeys);
-      console.log('Following file keys:', followingKeys);
+      // This is just for logging - we'll handle the error if it occurs
+      const followerPath = files.followers.filepath || files.followers.path;
+      const followingPath = files.following.filepath || files.following.path;
+      console.log('Attempted file paths:', { followerPath, followingPath });
       
-      // Try common path properties
-      for (const key of ['filepath', 'path', 'file', 'filePath']) {
-        if (files.followers[key]) {
-          followersPath = files.followers[key];
-          break;
-        }
-      }
-      
-      for (const key of ['filepath', 'path', 'file', 'filePath']) {
-        if (files.following[key]) {
-          followingPath = files.following[key];
-          break;
-        }
+      // This will likely fail on Vercel, but we'll catch the error
+      try {
+        const fs = require('fs');
+        followersHtml = fs.readFileSync(followerPath, 'utf8');
+        followingHtml = fs.readFileSync(followingPath, 'utf8');
+      } catch (fsError) {
+        console.error('File system error:', fsError);
+        return res.status(500).json({
+          success: false,
+          message: 'Error reading files. This may be due to deployment environment restrictions.'
+        });
       }
     }
-    
-    console.log('File paths:', { followersPath, followingPath });
-    
-    if (!followersPath || !followingPath) {
-      console.error('Could not determine file paths');
+
+    if (!followersHtml || !followingHtml) {
       return res.status(500).json({
         success: false,
-        message: 'Error processing files: Could not determine file paths'
+        message: 'Could not extract file contents'
       });
     }
-    
-    const followersHtml = fs.readFileSync(followersPath, 'utf8');
-    const followingHtml = fs.readFileSync(followingPath, 'utf8');
 
     console.log('Extracting usernames...');
     // Extract usernames from the HTML
@@ -133,15 +118,7 @@ export default async function handler(req, res) {
     // Here we're simulating storage for the example
     global.fullResultsList = nonFollowers;
 
-    // Clean up temporary files
-    try {
-      fs.unlinkSync(followersPath);
-      fs.unlinkSync(followingPath);
-      console.log('Temporary files cleaned up');
-    } catch (cleanupError) {
-      console.error('Error cleaning up files:', cleanupError);
-      // Continue despite cleanup errors
-    }
+    // No need to clean up files as we're not writing to disk
 
     console.log('Processing complete, returning results');
     return res.status(200).json({ 
@@ -163,8 +140,6 @@ export default async function handler(req, res) {
 function extractUsernames(html) {
   try {
     console.log('HTML length:', html.length);
-    // Log a small sample of the HTML to see its structure
-    console.log('HTML sample:', html.substring(0, 200) + '...');
     
     const root = parse(html);
     
