@@ -2,7 +2,7 @@ import { IncomingForm } from 'formidable';
 import fs from 'fs';
 import { parseFollowers } from '../../lib/parseHTML';
 
-// Disable the default body parser to allow formidable to parse the request
+// Disable the default body parser
 export const config = {
   api: {
     bodyParser: false,
@@ -21,7 +21,11 @@ export default async function handler(req, res) {
   }
 
   // Create a new instance of IncomingForm
-  const form = new IncomingForm();
+  const form = new IncomingForm({
+    keepExtensions: true,
+    // Important for Vercel: use /tmp directory
+    uploadDir: '/tmp',
+  });
 
   return new Promise((resolve, reject) => {
     form.parse(req, async (err, fields, files) => {
@@ -60,6 +64,22 @@ export default async function handler(req, res) {
         console.error(error);
         res.status(500).json({ success: false, message: 'File processing error' });
         return resolve();
+      } finally {
+        // Clean up temp files
+        if (files.followers && files.followers[0]) {
+          try {
+            fs.unlinkSync(files.followers[0].filepath);
+          } catch (e) {
+            console.error('Error deleting temp file:', e);
+          }
+        }
+        if (files.following && files.following[0]) {
+          try {
+            fs.unlinkSync(files.following[0].filepath);
+          } catch (e) {
+            console.error('Error deleting temp file:', e);
+          }
+        }
       }
     });
   });
