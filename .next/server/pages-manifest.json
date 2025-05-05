@@ -1,11 +1,5 @@
 {
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
-  "/_document": "pages/_document.js",
-  "/upload": "pages/upload.js",
-  "/api/create-checkout-session": "pages/api/create-checkout-session.js",
-  "/results": "pages/results.js",
-  "/": "pages/index.js",
-  "/api/get-full-list": "pages/api/get-full-list.js",
-  "/api/parse-files": "pages/api/parse-files.js"
+  "/_document": "pages/_document.js"
 }
